@@ -104,6 +104,12 @@ properties:
 
   aws.stemcell.kernel_id:
     description: AWS kernel id used by aws cpi
+  aws.stemcell.import_snapshot.bucket:
+    description: S3 bucket used by the ImportSnapshot heavy-stemcell path (uploads root.img and imports it via the AWS ImportSnapshot API, so it works off-EC2 e.g. inside a create-env container)
+    default: null
+  aws.stemcell.import_snapshot.role_name:
+    description: IAM role name AWS VM Import/Export assumes to read the stemcell image from the S3 bucket
+    default: null
   ntp:
     description: List of ntp server IPs. pool.ntp.org attempts to return IPs closest to your location, but you can still specify if needed.
     default:

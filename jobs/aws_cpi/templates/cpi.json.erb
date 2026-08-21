@@ -47,6 +47,23 @@ if_p('aws.stemcell.kernel_id') do |kernel_id|
   }
 end
 
+# ImportSnapshot heavy-stemcell path. This opt-in must reach the CPI as
+# cloud.properties.aws.stemcell.import_snapshot, which is where AwsConfig reads
+# it (@config.aws.stemcell['import_snapshot']). Build it only when at least one
+# sub-key is set, so unrelated deployments keep an empty aws.stemcell.
+import_snapshot = {}
+if_p('aws.stemcell.import_snapshot.bucket') do |bucket|
+  import_snapshot["bucket"] = bucket
+end
+if_p('aws.stemcell.import_snapshot.role_name') do |role_name|
+  import_snapshot["role_name"] = role_name
+end
+unless import_snapshot.empty?
+  aws_props = params["cloud"]["properties"]["aws"]
+  aws_props["stemcell"] ||= {}
+  aws_props["stemcell"]["import_snapshot"] = import_snapshot
+end
+
 if_p('aws.ec2_endpoint') do |endpoint|
   params["cloud"]["properties"]["aws"]["ec2_endpoint"] = endpoint
 end
