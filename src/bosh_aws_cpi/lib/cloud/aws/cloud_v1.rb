@@ -361,8 +361,17 @@ module Bosh::AwsCloud
 
     ##
     # Creates a new EC2 AMI using stemcell image.
-    # This method can only be run on an EC2 instance, as image creation
-    # involves creating and mounting new EBS volume as local block device.
+    # For light stemcells this resolves an existing AMI via the API. For full
+    # (heavy) stemcells there are two paths:
+    #   * the classic path (#create_ami_for_stemcell) attaches an EBS volume to
+    #     the current EC2 instance and dd's root.img onto it -- this requires
+    #     running on an EC2 instance with sudo and an attachable block device;
+    #   * the EBS-direct path (#create_ami_via_ebs_direct) writes root.img
+    #     straight into a new snapshot via the EBS direct APIs -- this works from
+    #     anywhere, including a create-env container that is not itself an EC2
+    #     instance, and needs no S3 bucket or VM Import/Export role. It is opt-in
+    #     via the landscape-specific
+    #     `cloud_provider.properties.aws.stemcell.ebs_direct` config.
     # @param [String] image_path local filesystem path to a stemcell image
     # @param [Hash] cloud_properties AWS-specific stemcell properties
     # @option cloud_properties [String] kernel_id
@@ -378,38 +387,7 @@ module Bosh::AwsCloud
     def create_stemcell(image_path, stemcell_properties)
       with_thread_name("create_stemcell(#{image_path}...)") do
         props = @props_factory.stemcell_props(stemcell_properties)
-
-        if props.is_light?
-          # select the correct image for the configured ec2 client
-          available_image = @ec2_resource.images(
-            filters: [{
-              name: 'image-id',
-              values: props.ami_ids
-            }],
-            include_deprecated: true,
-          ).first
-          raise Bosh::Clouds::CloudError, "Stemcell does not contain an AMI in region #{@config.aws.region}" unless available_image
-
-          if props.encrypted
-            copy_image_result = @ec2_client.copy_image(
-              source_region: @config.aws.region,
-              source_image_id: props.region_ami,
-              name: "Copied from SourceAMI #{props.region_ami}",
-              encrypted: props.encrypted,
-              kms_key_id: props.kms_key_arn
-            )
-
-            encrypted_image_id = copy_image_result.image_id
-            encrypted_image = @ec2_resource.image(encrypted_image_id)
-            ResourceWait.for_image(image: encrypted_image, state: 'available')
-
-            return encrypted_image_id.to_s
-          end
-
-          "#{available_image.id} light"
-        else
-          create_ami_for_stemcell(image_path, props, props.tags)
-        end
+        dispatch_create_stemcell(image_path, props, props.tags)
       end
     end
 
@@ -450,6 +428,107 @@ module Bosh::AwsCloud
     end
 
     private
+
+    # Shared create_stemcell routing for all CPI API versions.
+    #
+    # Single source of truth for choosing between the light, EBS-direct, and
+    # classic heavy-stemcell paths. CloudV1#create_stemcell and
+    # CloudV3#create_stemcell both delegate here so the routing can never drift
+    # between versions.
+    #
+    # @param image_path [String] local filesystem path to a stemcell image
+    # @param props [StemcellCloudProps] parsed stemcell cloud properties
+    # @param tags [Hash, Array, nil] tags to apply, sourced by the caller
+    # @return [String] EC2 AMI id of the stemcell
+    def dispatch_create_stemcell(image_path, props, tags)
+      if props.is_light?
+        # select the correct image for the configured ec2 client
+        available_image = @ec2_resource.images(
+          filters: [{
+            name: 'image-id',
+            values: props.ami_ids
+          }],
+          include_deprecated: true,
+        ).first
+        raise Bosh::Clouds::CloudError, "Stemcell does not contain an AMI in region #{@config.aws.region}" unless available_image
+
+        if props.encrypted
+          copy_image_result = @ec2_client.copy_image(
+            source_region: @config.aws.region,
+            source_image_id: props.region_ami,
+            name: "Copied from SourceAMI #{props.region_ami}",
+            encrypted: props.encrypted,
+            kms_key_id: props.kms_key_arn
+          )
+
+          encrypted_image_id = copy_image_result.image_id
+          encrypted_image = @ec2_resource.image(encrypted_image_id)
+          ResourceWait.for_image(image: encrypted_image, state: 'available')
+
+          return encrypted_image_id.to_s
+        end
+
+        "#{available_image.id} light"
+      elsif (ebs_direct_opts = resolve_ebs_direct_opts)
+        create_ami_via_ebs_direct(image_path, props, ebs_direct_opts, tags)
+      else
+        create_ami_for_stemcell(image_path, props, tags)
+      end
+    end
+
+    # Resolves the EBS-direct opt-in config, or nil when the classic
+    # (EBS-attach/current_vm_id) path should be used.
+    #
+    # The config is landscape-specific, so its natural home is the CPI's global
+    # config -- `cloud_provider.properties.aws.stemcell.ebs_direct` -- which
+    # reaches us as `@config.aws.stemcell['ebs_direct']` (AwsConfig always
+    # exposes #stemcell as a Hash). It is the same for every stemcell in a given
+    # director and is NOT baked into the (shared) stemcell tarball.
+    #
+    # A bare `true` means "use the EBS-direct path" and yields an empty hash.
+    #
+    # @return [Hash, nil] the ebs_direct options, or nil if not requested
+    def resolve_ebs_direct_opts
+      global = @config.aws.stemcell['ebs_direct']
+
+      return nil if global.nil? || global == false
+
+      global.is_a?(Hash) ? global : {}
+    end
+
+    # Container-friendly heavy-stemcell path. Unlike #create_ami_for_stemcell
+    # this never calls current_vm_id, never creates or attaches an EBS volume,
+    # and never shells out to stemcell-copy/dd. It writes root.img straight into
+    # a new snapshot via the EBS direct APIs, so it can run off-EC2 (e.g. in a
+    # create-env container that is not itself an EC2 instance) with no S3 bucket
+    # and no VM Import/Export role.
+    #
+    # @param opts [Hash] resolved ebs_direct options (encrypted, kms_key_arn)
+    def create_ami_via_ebs_direct(image_path, stemcell_cloud_props, opts, tags = nil)
+      creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
+
+      # Prefer the nested `ebs_direct.*` options, falling back to the stemcell
+      # props. `encrypted` is normalized to a strict boolean (nil reads as
+      # false) and `tags` to a hash so nil never reaches the AWS boundary.
+      encrypted = if opts.key?('encrypted')
+                    !!opts['encrypted']
+                  else
+                    stemcell_cloud_props.respond_to?(:encrypted) ? !!stemcell_cloud_props.encrypted : false
+                  end
+      kms_key_arn = if opts.key?('kms_key_arn')
+                      opts['kms_key_arn']
+                    elsif stemcell_cloud_props.respond_to?(:kms_key_arn)
+                      stemcell_cloud_props.kms_key_arn
+                    end
+
+      logger.info('Creating stemcell via EBS direct APIs')
+      creator.create_via_ebs_direct(
+        image_path,
+        encrypted: encrypted,
+        kms_key_arn: kms_key_arn,
+        tags: tags.nil? ? {} : tags,
+      ).id
+    end
 
     def update_agent_settings(instance_id)
       raise ArgumentError, 'block is not provided' unless block_given?
