@@ -1,15 +1,13 @@
 require "spec_helper"
 
-# Regression coverage for the CloudV3 create_stemcell dispatch under the
-# EBS-direct heavy-stemcell path.
+# Regression coverage for the CloudV3 create_stemcell dispatch.
 #
 # bosh create-env negotiates to api_version 3, so create_cloud builds a
-# CloudV3. CloudV3 overrides create_stemcell; it must honor the ebs_direct
-# opt-in identically to CloudV1 by routing the heavy path through the shared
-# #dispatch_create_stemcell. These specs assert it delegates to
-# StemcellCreator#create_via_ebs_direct and NEVER touches the EC2 metadata
-# endpoint (current_vm_id) or attaches an EBS volume, and that env tags flow
-# through.
+# CloudV3. CloudV3 overrides create_stemcell; it must route the heavy path
+# through the shared #dispatch_create_stemcell just like CloudV1. These specs
+# assert it delegates to StemcellCreator#create_via_ebs_direct and NEVER
+# touches the EC2 metadata endpoint (current_vm_id) or attaches an EBS volume,
+# and that env tags flow through.
 describe Bosh::AwsCloud::CloudV3 do
   before { @tmp_dir = Dir.mktmpdir }
   after { FileUtils.rm_rf(@tmp_dir) }
@@ -32,11 +30,8 @@ describe Bosh::AwsCloud::CloudV3 do
       }
     end
 
-    def cloud_with_global_ebs_direct(ebs_direct, aws_overrides = {})
-      options = mock_cloud_properties_merge(
-        "aws" => { "stemcell" => { "ebs_direct" => ebs_direct } }.merge(aws_overrides),
-      )
-      mock_cloud_v3(options) do
+    def make_cloud
+      mock_cloud_v3 do
         allow(Bosh::AwsCloud::StemcellCreator).to receive(:new).and_return(creator)
         allow(Bosh::AwsCloud::VolumeManager).to receive(:new).and_return(volume_manager)
         allow(Bosh::AwsCloud::AvailabilityZoneSelector).to receive(:new).and_return(az_selector)
@@ -44,7 +39,7 @@ describe Bosh::AwsCloud::CloudV3 do
     end
 
     it "creates a stemcell via EBS direct under api_version 3 without touching EC2 metadata or EBS" do
-      cloud = cloud_with_global_ebs_direct(true)
+      cloud = make_cloud
 
       expect(cloud).not_to receive(:current_vm_id)
       expect(volume_manager).not_to receive(:create_ebs_volume)
@@ -61,7 +56,7 @@ describe Bosh::AwsCloud::CloudV3 do
     end
 
     it "applies env tags to the imported stemcell" do
-      cloud = cloud_with_global_ebs_direct(true)
+      cloud = make_cloud
 
       env = { "tags" => { "director" => "my-director" } }
 
@@ -78,10 +73,12 @@ describe Bosh::AwsCloud::CloudV3 do
     end
 
     it "forwards the documented encrypted/kms_key_arn options" do
-      cloud = cloud_with_global_ebs_direct(
+      props_with_encryption = stemcell_properties.merge(
         "encrypted" => true,
         "kms_key_arn" => "arn:aws:kms:us-east-1:ID:key/GUID",
       )
+
+      cloud = make_cloud
 
       expect(creator).to receive(:create_via_ebs_direct).with(
         "/tmp/foo",
@@ -90,24 +87,7 @@ describe Bosh::AwsCloud::CloudV3 do
         tags: {},
       ).and_return(stemcell)
 
-      expect(cloud.create_stemcell("/tmp/foo", stemcell_properties)).to eq("ami-ebs")
-    end
-
-    it "falls back to the classic EBS-attach path when ebs_direct is not configured" do
-      cloud = mock_cloud_v3 do
-        allow(Bosh::AwsCloud::StemcellCreator).to receive(:new).and_return(creator)
-        allow(Bosh::AwsCloud::VolumeManager).to receive(:new).and_return(volume_manager)
-        allow(Bosh::AwsCloud::AvailabilityZoneSelector).to receive(:new).and_return(az_selector)
-      end
-
-      expect(creator).not_to receive(:create_via_ebs_direct)
-      expect(cloud).to receive(:current_vm_id).and_raise(
-        Bosh::Clouds::CloudError.new("Timed out reading instance metadata, please make sure CPI is running on EC2 instance")
-      )
-
-      expect {
-        cloud.create_stemcell("/tmp/foo", stemcell_properties)
-      }.to raise_error(/Timed out reading instance metadata/)
+      expect(cloud.create_stemcell("/tmp/foo", props_with_encryption)).to eq("ami-ebs")
     end
   end
 end

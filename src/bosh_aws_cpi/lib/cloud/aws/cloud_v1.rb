@@ -57,10 +57,6 @@ module Bosh::AwsCloud
     # instance id cannot change while current process is running
     # and thus memoizing it.
     def current_vm_id
-      # xxxx = coreCloud.current_vm_id()
-      # process xxxx based on version
-      # return based on version
-
       return @current_vm_id if @current_vm_id
 
       http_client = HTTPClient.new
@@ -71,7 +67,7 @@ module Bosh::AwsCloud
       # instance metadata
       response = http_client.put('http://169.254.169.254/latest/api/token', nil, { 'X-aws-ec2-metadata-token-ttl-seconds' => '300' })
       if response.status == 200
-        headers['X-aws-ec2-metadata-token'] = response.body #body consists of the token
+        headers['X-aws-ec2-metadata-token'] = response.body
       end
 
       response = http_client.get('http://169.254.169.254/latest/meta-data/instance-id/', nil, headers)
@@ -361,17 +357,12 @@ module Bosh::AwsCloud
 
     ##
     # Creates a new EC2 AMI using stemcell image.
-    # For light stemcells this resolves an existing AMI via the API. For full
-    # (heavy) stemcells there are two paths:
-    #   * the classic path (#create_ami_for_stemcell) attaches an EBS volume to
-    #     the current EC2 instance and dd's root.img onto it -- this requires
-    #     running on an EC2 instance with sudo and an attachable block device;
-    #   * the EBS-direct path (#create_ami_via_ebs_direct) writes root.img
-    #     straight into a new snapshot via the EBS direct APIs -- this works from
-    #     anywhere, including a create-env container that is not itself an EC2
-    #     instance, and needs no S3 bucket or VM Import/Export role. It is opt-in
-    #     via the landscape-specific
-    #     `cloud_provider.properties.aws.stemcell.ebs_direct` config.
+    # For light stemcells this resolves an existing AMI via the API.
+    # For heavy stemcells the EBS-direct path is always used: root.img is
+    # written straight into a new EBS snapshot via the EBS direct APIs
+    # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot), then the AMI is
+    # registered from that snapshot. This works off-EC2 (e.g. inside a
+    # create-env container) with no S3 bucket and no VM Import/Export role.
     # @param [String] image_path local filesystem path to a stemcell image
     # @param [Hash] cloud_properties AWS-specific stemcell properties
     # @option cloud_properties [String] kernel_id
@@ -399,6 +390,7 @@ module Bosh::AwsCloud
         stemcell.delete
       end
     end
+
     # Map a set of cloud agnostic VM properties (cpu, ram, ephemeral_disk_size) to
     # a set of AWS specific cloud_properties
     # @param [Hash] vm_properties requested cpu, ram, and ephemeral_disk_size
@@ -431,10 +423,9 @@ module Bosh::AwsCloud
 
     # Shared create_stemcell routing for all CPI API versions.
     #
-    # Single source of truth for choosing between the light, EBS-direct, and
-    # classic heavy-stemcell paths. CloudV1#create_stemcell and
-    # CloudV3#create_stemcell both delegate here so the routing can never drift
-    # between versions.
+    # Light stemcells resolve an existing AMI; heavy stemcells always use the
+    # EBS-direct path. CloudV1#create_stemcell and CloudV3#create_stemcell both
+    # delegate here so the routing can never drift between versions.
     #
     # @param image_path [String] local filesystem path to a stemcell image
     # @param props [StemcellCloudProps] parsed stemcell cloud properties
@@ -442,7 +433,6 @@ module Bosh::AwsCloud
     # @return [String] EC2 AMI id of the stemcell
     def dispatch_create_stemcell(image_path, props, tags)
       if props.is_light?
-        # select the correct image for the configured ec2 client
         available_image = @ec2_resource.images(
           filters: [{
             name: 'image-id',
@@ -469,57 +459,23 @@ module Bosh::AwsCloud
         end
 
         "#{available_image.id} light"
-      elsif (ebs_direct_opts = resolve_ebs_direct_opts)
-        create_ami_via_ebs_direct(image_path, props, ebs_direct_opts, tags)
       else
-        create_ami_for_stemcell(image_path, props, tags)
+        create_ami_via_ebs_direct(image_path, props, tags)
       end
     end
 
-    # Resolves the EBS-direct opt-in config, or nil when the classic
-    # (EBS-attach/current_vm_id) path should be used.
+    # Heavy-stemcell path via the EBS direct APIs.
     #
-    # The config is landscape-specific, so its natural home is the CPI's global
-    # config -- `cloud_provider.properties.aws.stemcell.ebs_direct` -- which
-    # reaches us as `@config.aws.stemcell['ebs_direct']` (AwsConfig always
-    # exposes #stemcell as a Hash). It is the same for every stemcell in a given
-    # director and is NOT baked into the (shared) stemcell tarball.
-    #
-    # A bare `true` means "use the EBS-direct path" and yields an empty hash.
-    #
-    # @return [Hash, nil] the ebs_direct options, or nil if not requested
-    def resolve_ebs_direct_opts
-      global = @config.aws.stemcell['ebs_direct']
-
-      return nil if global.nil? || global == false
-
-      global.is_a?(Hash) ? global : {}
-    end
-
-    # Container-friendly heavy-stemcell path. Unlike #create_ami_for_stemcell
-    # this never calls current_vm_id, never creates or attaches an EBS volume,
-    # and never shells out to stemcell-copy/dd. It writes root.img straight into
-    # a new snapshot via the EBS direct APIs, so it can run off-EC2 (e.g. in a
-    # create-env container that is not itself an EC2 instance) with no S3 bucket
+    # Writes root.img straight into a new EBS snapshot
+    # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot) then registers the AMI.
+    # Never calls current_vm_id, never creates or attaches an EBS volume, and
+    # never shells out to stemcell-copy/dd -- works off-EC2 with no S3 bucket
     # and no VM Import/Export role.
-    #
-    # @param opts [Hash] resolved ebs_direct options (encrypted, kms_key_arn)
-    def create_ami_via_ebs_direct(image_path, stemcell_cloud_props, opts, tags = nil)
+    def create_ami_via_ebs_direct(image_path, stemcell_cloud_props, tags = nil)
       creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
 
-      # Prefer the nested `ebs_direct.*` options, falling back to the stemcell
-      # props. `encrypted` is normalized to a strict boolean (nil reads as
-      # false) and `tags` to a hash so nil never reaches the AWS boundary.
-      encrypted = if opts.key?('encrypted')
-                    !!opts['encrypted']
-                  else
-                    stemcell_cloud_props.respond_to?(:encrypted) ? !!stemcell_cloud_props.encrypted : false
-                  end
-      kms_key_arn = if opts.key?('kms_key_arn')
-                      opts['kms_key_arn']
-                    elsif stemcell_cloud_props.respond_to?(:kms_key_arn)
-                      stemcell_cloud_props.kms_key_arn
-                    end
+      encrypted = stemcell_cloud_props.respond_to?(:encrypted) ? !!stemcell_cloud_props.encrypted : false
+      kms_key_arn = stemcell_cloud_props.respond_to?(:kms_key_arn) ? stemcell_cloud_props.kms_key_arn : nil
 
       logger.info('Creating stemcell via EBS direct APIs')
       creator.create_via_ebs_direct(
@@ -537,59 +493,6 @@ module Bosh::AwsCloud
       yield settings
       registry.update_settings(instance_id, settings)
       logger.debug("updated registry settings: #{registry.read_settings(instance_id)}")
-    end
-
-    def create_ami_for_stemcell(image_path, stemcell_cloud_props, tags = nil)
-      creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
-
-      begin
-        director_vm_id = current_vm_id
-        instance = nil
-        volume = nil
-
-        instance = @ec2_resource.instance(director_vm_id)
-        unless instance.exists?
-          cloud_error(
-            "Could not locate the current VM with id '#{director_vm_id}'." \
-                'Ensure that the current VM is located in the same region as configured in the manifest.'
-          )
-        end
-
-        normalized_tags = TagManager.tags_hash(tags)
-        stemcell_tags = stemcell_creation_tags(normalized_tags)
-        disk_config = VolumeProperties.new(
-          size: stemcell_cloud_props.disk,
-          az: @az_selector.select_availability_zone(director_vm_id),
-          encrypted: stemcell_cloud_props.encrypted,
-          kms_key_arn: stemcell_cloud_props.kms_key_arn,
-          tags: stemcell_tags
-        ).persistent_disk_config
-        volume = @volume_manager.create_ebs_volume(disk_config)
-        requested_path = @volume_manager.attach_ebs_volume(instance, volume)
-
-        logger.debug("Requested block device: #{requested_path}")
-        expected_path = BlockDeviceManager.device_path(
-          requested_path,
-          instance.instance_type,
-          volume.id,
-          @cloud_core.instance_type_info,
-        )
-
-        logger.debug("Expected block device: #{expected_path}")
-        actual_path = BlockDeviceManager.block_device_ready?(expected_path)
-
-        logger.debug("Actual block device: #{actual_path}")
-        logger.info("Creating stemcell with: '#{volume.id}'")
-        creator.create(volume, actual_path, image_path, normalized_tags).id
-      rescue => e
-        logger.error(e)
-        raise e
-      ensure
-        if instance && volume
-          @volume_manager.detach_ebs_volume(instance.reload, volume, true)
-          @volume_manager.delete_ebs_volume(volume)
-        end
-      end
     end
 
     def get_volume_ids_for_vm(vm_instance)
