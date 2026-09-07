@@ -57,6 +57,10 @@ module Bosh::AwsCloud
     # instance id cannot change while current process is running
     # and thus memoizing it.
     def current_vm_id
+      # xxxx = coreCloud.current_vm_id()
+      # process xxxx based on version
+      # return based on version
+
       return @current_vm_id if @current_vm_id
 
       http_client = HTTPClient.new
@@ -67,7 +71,7 @@ module Bosh::AwsCloud
       # instance metadata
       response = http_client.put('http://169.254.169.254/latest/api/token', nil, { 'X-aws-ec2-metadata-token-ttl-seconds' => '300' })
       if response.status == 200
-        headers['X-aws-ec2-metadata-token'] = response.body
+        headers['X-aws-ec2-metadata-token'] = response.body #body consists of the token
       end
 
       response = http_client.get('http://169.254.169.254/latest/meta-data/instance-id/', nil, headers)
@@ -433,6 +437,7 @@ module Bosh::AwsCloud
     # @return [String] EC2 AMI id of the stemcell
     def dispatch_create_stemcell(image_path, props, tags)
       if props.is_light?
+        # select the correct image for the configured ec2 client
         available_image = @ec2_resource.images(
           filters: [{
             name: 'image-id',
