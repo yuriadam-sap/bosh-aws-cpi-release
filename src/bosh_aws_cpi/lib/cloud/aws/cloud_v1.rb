@@ -496,11 +496,5 @@ module Bosh::AwsCloud
       vm_instance.block_device_mappings.select(&:ebs)
                  .map { |block_device| block_device.ebs.volume_id }
     end
-
-    def stemcell_creation_tags(tags)
-      return [] if tags.nil? || tags.empty?
-
-      TagManager.format_tags(tags)
-    end
   end
 end
