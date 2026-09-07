@@ -361,12 +361,12 @@ module Bosh::AwsCloud
 
     ##
     # Creates a new EC2 AMI using stemcell image.
-    # For light stemcells this resolves an existing AMI via the API.
-    # For heavy stemcells the EBS-direct path is always used: root.img is
-    # written straight into a new EBS snapshot via the EBS direct APIs
-    # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot), then the AMI is
-    # registered from that snapshot. This works off-EC2 (e.g. inside a
-    # create-env container) with no S3 bucket and no VM Import/Export role.
+    # Light stemcells resolve an existing AMI via the API. Heavy stemcells
+    # write root.img straight into a new EBS snapshot via the EBS direct APIs
+    # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot) and register the AMI
+    # from that snapshot -- so, unlike the previous volume-attach approach, this
+    # no longer has to run on an EC2 instance and needs no S3 bucket or VM
+    # Import/Export role.
     # @param [String] image_path local filesystem path to a stemcell image
     # @param [Hash] cloud_properties AWS-specific stemcell properties
     # @option cloud_properties [String] kernel_id
@@ -384,7 +384,33 @@ module Bosh::AwsCloud
         props = @props_factory.stemcell_props(stemcell_properties)
 
         if props.is_light?
-          create_light_stemcell(props)
+          # select the correct image for the configured ec2 client
+          available_image = @ec2_resource.images(
+            filters: [{
+              name: 'image-id',
+              values: props.ami_ids
+            }],
+            include_deprecated: true,
+          ).first
+          raise Bosh::Clouds::CloudError, "Stemcell does not contain an AMI in region #{@config.aws.region}" unless available_image
+
+          if props.encrypted
+            copy_image_result = @ec2_client.copy_image(
+              source_region: @config.aws.region,
+              source_image_id: props.region_ami,
+              name: "Copied from SourceAMI #{props.region_ami}",
+              encrypted: props.encrypted,
+              kms_key_id: props.kms_key_arn
+            )
+
+            encrypted_image_id = copy_image_result.image_id
+            encrypted_image = @ec2_resource.image(encrypted_image_id)
+            ResourceWait.for_image(image: encrypted_image, state: 'available')
+
+            return encrypted_image_id.to_s
+          end
+
+          "#{available_image.id} light"
         else
           create_ami_via_ebs_direct(image_path, props, props.tags)
         end
@@ -399,7 +425,6 @@ module Bosh::AwsCloud
         stemcell.delete
       end
     end
-
     # Map a set of cloud agnostic VM properties (cpu, ram, ephemeral_disk_size) to
     # a set of AWS specific cloud_properties
     # @param [Hash] vm_properties requested cpu, ram, and ephemeral_disk_size
@@ -430,37 +455,13 @@ module Bosh::AwsCloud
 
     private
 
-    # Light-stemcell path: resolve (and optionally re-encrypt) an existing AMI
-    # via the API. Heavy stemcells never reach here -- see
-    # #create_ami_via_ebs_direct.
-    def create_light_stemcell(props)
-      # select the correct image for the configured ec2 client
-      available_image = @ec2_resource.images(
-        filters: [{
-          name: 'image-id',
-          values: props.ami_ids
-        }],
-        include_deprecated: true,
-      ).first
-      raise Bosh::Clouds::CloudError, "Stemcell does not contain an AMI in region #{@config.aws.region}" unless available_image
+    def update_agent_settings(instance_id)
+      raise ArgumentError, 'block is not provided' unless block_given?
 
-      if props.encrypted
-        copy_image_result = @ec2_client.copy_image(
-          source_region: @config.aws.region,
-          source_image_id: props.region_ami,
-          name: "Copied from SourceAMI #{props.region_ami}",
-          encrypted: props.encrypted,
-          kms_key_id: props.kms_key_arn
-        )
-
-        encrypted_image_id = copy_image_result.image_id
-        encrypted_image = @ec2_resource.image(encrypted_image_id)
-        ResourceWait.for_image(image: encrypted_image, state: 'available')
-
-        return encrypted_image_id.to_s
-      end
-
-      "#{available_image.id} light"
+      settings = registry.read_settings(instance_id)
+      yield settings
+      registry.update_settings(instance_id, settings)
+      logger.debug("updated registry settings: #{registry.read_settings(instance_id)}")
     end
 
     # Heavy-stemcell path via the EBS direct APIs. Shared seam for all CPI API
@@ -484,15 +485,6 @@ module Bosh::AwsCloud
         kms_key_arn: stemcell_cloud_props.kms_key_arn,
         tags: tags || {},
       ).id
-    end
-
-    def update_agent_settings(instance_id)
-      raise ArgumentError, 'block is not provided' unless block_given?
-
-      settings = registry.read_settings(instance_id)
-      yield settings
-      registry.update_settings(instance_id, settings)
-      logger.debug("updated registry settings: #{registry.read_settings(instance_id)}")
     end
 
     def get_volume_ids_for_vm(vm_instance)
