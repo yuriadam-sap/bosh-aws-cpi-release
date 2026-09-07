@@ -474,15 +474,12 @@ module Bosh::AwsCloud
     def create_ami_via_ebs_direct(image_path, stemcell_cloud_props, tags = nil)
       creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
 
-      encrypted = stemcell_cloud_props.respond_to?(:encrypted) ? !!stemcell_cloud_props.encrypted : false
-      kms_key_arn = stemcell_cloud_props.respond_to?(:kms_key_arn) ? stemcell_cloud_props.kms_key_arn : nil
-
       logger.info('Creating stemcell via EBS direct APIs')
       creator.create_via_ebs_direct(
         image_path,
-        encrypted: encrypted,
-        kms_key_arn: kms_key_arn,
-        tags: tags.nil? ? {} : tags,
+        encrypted: !!stemcell_cloud_props.encrypted,
+        kms_key_arn: stemcell_cloud_props.kms_key_arn,
+        tags: tags || {},
       ).id
     end
 

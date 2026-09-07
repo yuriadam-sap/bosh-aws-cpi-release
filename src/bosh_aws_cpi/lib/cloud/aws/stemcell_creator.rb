@@ -9,8 +9,8 @@ module Bosh::AwsCloud
     # PutSnapshotBlock is capped at 1,000 req/s per snapshot; keep concurrency
     # comfortably under that so a single stemcell import stays within the cap.
     EBS_DIRECT_PUT_CONCURRENCY = 16
-    # StartSnapshot requires the snapshot to receive puts/complete within this
-    # many minutes or it moves to `error`.
+    # StartSnapshot moves the snapshot to `error` if it is not completed within
+    # this many minutes.
     EBS_DIRECT_SNAPSHOT_TIMEOUT_MINUTES = 60
 
     attr_reader :resource
@@ -39,13 +39,10 @@ module Bosh::AwsCloud
       register_image_from_snapshot(snapshot.id)
     end
 
-    # Container-friendly alternative to #create that does not require the CPI to
-    # run on an EC2 instance and needs neither an S3 bucket nor a VM
-    # Import/Export role. It writes root.img straight into a new EBS snapshot
-    # using the EBS direct APIs (StartSnapshot / PutSnapshotBlock /
-    # CompleteSnapshot), then registers the AMI from that snapshot -- so it can
-    # run off-EC2 (e.g. in a create-env container) with only the ebs:* write
-    # permissions.
+    # Container-friendly alternative to #create: writes root.img straight into a
+    # new EBS snapshot via the EBS direct APIs, then registers the AMI. Runs
+    # off-EC2 with only ebs:* write permissions -- no instance, no S3 bucket,
+    # no VM Import/Export role.
     #
     # @param image_path [String] local path to the stemcell .tgz image
     # @param encrypted [Boolean] whether the snapshot must be encrypted
@@ -69,10 +66,9 @@ module Bosh::AwsCloud
 
     private
 
-    # Streams `root.img` out of the stemcell tarball onto disk. Uses IO.popen
-    # with an argv array (no shell), so an image_path containing spaces or shell
-    # metacharacters cannot be interpreted by a shell, and the multi-GB member
-    # is streamed rather than buffered in memory.
+    # Uses IO.popen with an argv array (no shell) so an image_path containing
+    # spaces or shell metacharacters cannot be interpreted by a shell, and the
+    # multi-GB member is streamed rather than buffered in memory.
     def extract_root_image(image_path, dest_path)
       File.open(dest_path, 'wb') do |dest|
         IO.popen(['tar', '-xzf', image_path, '-O', 'root.img'], 'rb') do |tar_out|
@@ -86,10 +82,6 @@ module Bosh::AwsCloud
       raise Bosh::Clouds::CloudError, "Unable to extract stemcell root image: #{e.message}"
     end
 
-    # Creates a new EBS snapshot from the raw root image using the EBS direct
-    # APIs and returns its snapshot id. Blocks that are entirely zero are
-    # skipped -- EBS reads unwritten blocks back as zero, so a sparse stemcell
-    # disk only pays for the blocks that actually contain data.
     def write_snapshot_via_ebs_direct(root_img, encrypted, kms_key_arn)
       volume_size_gib = bytes_to_gib(File.size(root_img))
       has_kms_key = !(kms_key_arn.nil? || kms_key_arn.to_s.empty?)
@@ -99,8 +91,7 @@ module Bosh::AwsCloud
         client_token: SecureRandom.uuid,
         timeout: EBS_DIRECT_SNAPSHOT_TIMEOUT_MINUTES,
       }
-      # Encrypt when either an explicit KMS key is given or encryption is
-      # requested (which may rely on the account default EBS key).
+      # A KMS key implies encryption; encryption without a key uses the account default EBS key.
       if encrypted || has_kms_key
         start_params[:encrypted] = true
         start_params[:kms_key_arn] = kms_key_arn if has_kms_key
@@ -125,9 +116,9 @@ module Bosh::AwsCloud
       raise Bosh::Clouds::CloudError, "EBS direct snapshot creation failed: #{e.message}"
     end
 
-    # Reads root_img in block_size chunks and writes every non-zero block to the
-    # pending snapshot, in parallel with bounded concurrency. Returns the number
-    # of blocks actually written (needed by CompleteSnapshot).
+    # All-zero blocks are skipped: EBS reads unwritten blocks back as zero, so a
+    # sparse stemcell disk only pays for the blocks that actually hold data.
+    # Returns the number of blocks written (needed by CompleteSnapshot).
     def put_snapshot_blocks(snapshot_id, root_img, block_size)
       zero_block = "\0".b * block_size
       queue = Queue.new
@@ -171,7 +162,6 @@ module Bosh::AwsCloud
       written
     end
 
-    # Writes a single block, retrying transient AWS errors a few times.
     def put_one_block(snapshot_id, block_index, data)
       checksum = Base64.strict_encode64(Digest::SHA256.digest(data))
       attempts = 0
@@ -194,8 +184,7 @@ module Bosh::AwsCloud
       end
     end
 
-    # Waits for the snapshot sealed by CompleteSnapshot to become available.
-    # Uses the standard ResourceWait poller (same as the classic path).
+    # Same ResourceWait poller as the classic path.
     def wait_for_snapshot_completed(snapshot_id)
       snapshot = resource.snapshot(snapshot_id)
       ResourceWait.for_snapshot(snapshot: snapshot, state: 'completed')
@@ -214,16 +203,13 @@ module Bosh::AwsCloud
       snapshot = resource.snapshot(snapshot_id)
       TagManager.create_tags(snapshot, @creation_tags)
     rescue Aws::Errors::ServiceError => e
-      # Tagging is a cosmetic post-step: the snapshot already exists. A tag
-      # failure must not discard the finished snapshot, so log and continue to
-      # AMI registration.
+      # The snapshot already exists; a tag failure must not discard it.
       logger.error("could not tag snapshot #{snapshot_id}: #{e.message}")
     end
 
-    # Builds an EBS direct client that reuses the EC2 client's resolved
-    # credentials and region, so writes authenticate as the same identity the
-    # CPI is configured with (static keys / instance-profile / AssumeRole)
-    # instead of falling back to the ambient default credential chain.
+    # Reuses the EC2 client's resolved credentials and region so writes
+    # authenticate as the configured CPI identity rather than the ambient
+    # default credential chain.
     def ebs_client
       @ebs_client ||= begin
         ec2_config = resource.client.config
