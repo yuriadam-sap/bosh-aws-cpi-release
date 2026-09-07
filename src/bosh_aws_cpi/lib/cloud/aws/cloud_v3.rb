@@ -73,9 +73,9 @@ module Bosh::AwsCloud
 
           "#{available_image.id} light"
         else
-          # Heavy stemcells share CloudV1's EBS-direct seam. Tags are sourced
+          # Heavy stemcells share CloudV1's seam. Tags are sourced
           # from the env argument (V3-specific) rather than props.tags.
-          create_ami_via_ebs_direct(image_path, props, tags)
+          create_ami_for_stemcell(image_path, props, tags)
         end
       end
     end

@@ -412,7 +412,7 @@ module Bosh::AwsCloud
 
           "#{available_image.id} light"
         else
-          create_ami_via_ebs_direct(image_path, props, props.tags)
+          create_ami_for_stemcell(image_path, props, props.tags)
         end
       end
     end
@@ -464,18 +464,18 @@ module Bosh::AwsCloud
       logger.debug("updated registry settings: #{registry.read_settings(instance_id)}")
     end
 
-    # Heavy-stemcell path via the EBS direct APIs. Shared seam for all CPI API
-    # versions: CloudV1#create_stemcell and CloudV3#create_stemcell both route
-    # heavy stemcells here so the two versions cannot diverge. Callers pass the
-    # tags from whichever source is correct for their version (props.tags for
-    # V1, the env argument for V3).
+    # Heavy-stemcell path. Shared seam for all CPI API versions:
+    # CloudV1#create_stemcell and CloudV3#create_stemcell both route heavy
+    # stemcells here so the two versions cannot diverge. Callers pass the tags
+    # from whichever source is correct for their version (props.tags for V1,
+    # the env argument for V3).
     #
-    # Writes root.img straight into a new EBS snapshot
+    # Writes root.img straight into a new EBS snapshot via the EBS direct APIs
     # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot) then registers the AMI.
     # Never calls current_vm_id, never creates or attaches an EBS volume, and
     # never shells out to stemcell-copy/dd -- works off-EC2 with no S3 bucket
     # and no VM Import/Export role.
-    def create_ami_via_ebs_direct(image_path, stemcell_cloud_props, tags = nil)
+    def create_ami_for_stemcell(image_path, stemcell_cloud_props, tags = nil)
       creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
 
       logger.info('Creating stemcell via EBS direct APIs')
