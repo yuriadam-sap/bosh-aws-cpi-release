@@ -382,7 +382,12 @@ module Bosh::AwsCloud
     def create_stemcell(image_path, stemcell_properties)
       with_thread_name("create_stemcell(#{image_path}...)") do
         props = @props_factory.stemcell_props(stemcell_properties)
-        dispatch_create_stemcell(image_path, props, props.tags)
+
+        if props.is_light?
+          create_light_stemcell(props)
+        else
+          create_ami_via_ebs_direct(image_path, props, props.tags)
+        end
       end
     end
 
@@ -425,51 +430,44 @@ module Bosh::AwsCloud
 
     private
 
-    # Shared create_stemcell routing for all CPI API versions.
-    #
-    # Light stemcells resolve an existing AMI; heavy stemcells always use the
-    # EBS-direct path. CloudV1#create_stemcell and CloudV3#create_stemcell both
-    # delegate here so the routing can never drift between versions.
-    #
-    # @param image_path [String] local filesystem path to a stemcell image
-    # @param props [StemcellCloudProps] parsed stemcell cloud properties
-    # @param tags [Hash, Array, nil] tags to apply, sourced by the caller
-    # @return [String] EC2 AMI id of the stemcell
-    def dispatch_create_stemcell(image_path, props, tags)
-      if props.is_light?
-        # select the correct image for the configured ec2 client
-        available_image = @ec2_resource.images(
-          filters: [{
-            name: 'image-id',
-            values: props.ami_ids
-          }],
-          include_deprecated: true,
-        ).first
-        raise Bosh::Clouds::CloudError, "Stemcell does not contain an AMI in region #{@config.aws.region}" unless available_image
+    # Light-stemcell path: resolve (and optionally re-encrypt) an existing AMI
+    # via the API. Heavy stemcells never reach here -- see
+    # #create_ami_via_ebs_direct.
+    def create_light_stemcell(props)
+      # select the correct image for the configured ec2 client
+      available_image = @ec2_resource.images(
+        filters: [{
+          name: 'image-id',
+          values: props.ami_ids
+        }],
+        include_deprecated: true,
+      ).first
+      raise Bosh::Clouds::CloudError, "Stemcell does not contain an AMI in region #{@config.aws.region}" unless available_image
 
-        if props.encrypted
-          copy_image_result = @ec2_client.copy_image(
-            source_region: @config.aws.region,
-            source_image_id: props.region_ami,
-            name: "Copied from SourceAMI #{props.region_ami}",
-            encrypted: props.encrypted,
-            kms_key_id: props.kms_key_arn
-          )
+      if props.encrypted
+        copy_image_result = @ec2_client.copy_image(
+          source_region: @config.aws.region,
+          source_image_id: props.region_ami,
+          name: "Copied from SourceAMI #{props.region_ami}",
+          encrypted: props.encrypted,
+          kms_key_id: props.kms_key_arn
+        )
 
-          encrypted_image_id = copy_image_result.image_id
-          encrypted_image = @ec2_resource.image(encrypted_image_id)
-          ResourceWait.for_image(image: encrypted_image, state: 'available')
+        encrypted_image_id = copy_image_result.image_id
+        encrypted_image = @ec2_resource.image(encrypted_image_id)
+        ResourceWait.for_image(image: encrypted_image, state: 'available')
 
-          return encrypted_image_id.to_s
-        end
-
-        "#{available_image.id} light"
-      else
-        create_ami_via_ebs_direct(image_path, props, tags)
+        return encrypted_image_id.to_s
       end
+
+      "#{available_image.id} light"
     end
 
-    # Heavy-stemcell path via the EBS direct APIs.
+    # Heavy-stemcell path via the EBS direct APIs. Shared seam for all CPI API
+    # versions: CloudV1#create_stemcell and CloudV3#create_stemcell both route
+    # heavy stemcells here so the two versions cannot diverge. Callers pass the
+    # tags from whichever source is correct for their version (props.tags for
+    # V1, the env argument for V3).
     #
     # Writes root.img straight into a new EBS snapshot
     # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot) then registers the AMI.

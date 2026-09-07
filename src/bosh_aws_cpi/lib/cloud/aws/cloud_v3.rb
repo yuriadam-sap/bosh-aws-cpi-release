@@ -12,9 +12,8 @@ module Bosh::AwsCloud
     # Creates a new EC2 AMI using stemcell image.
     #
     # Light stemcells resolve (and optionally re-encrypt) an existing AMI. Heavy
-    # stemcells route through the shared #dispatch_create_stemcell on CloudV1,
-    # which chooses between the classic EBS-attach path and the EBS-direct path,
-    # so V1 and V3 cannot diverge.
+    # stemcells route through the shared #create_ami_via_ebs_direct on CloudV1,
+    # so the heavy path cannot diverge between V1 and V3.
     #
     # @param [String] image_path local filesystem path to a stemcell image
     # @param [Hash] cloud_properties AWS-specific stemcell properties
@@ -39,9 +38,9 @@ module Bosh::AwsCloud
         if props.is_light?
           create_light_stemcell_v3(props, tags)
         else
-          # Route the heavy path through the shared dispatch. Tags are sourced
+          # Heavy stemcells share CloudV1's EBS-direct seam. Tags are sourced
           # from the env argument (V3-specific) rather than props.tags.
-          stemcell_id = dispatch_create_stemcell(image_path, props, tags)
+          stemcell_id = create_ami_via_ebs_direct(image_path, props, tags)
 
           if !tags.nil? && !tags.empty?
             logger.info("Created stemcell AMI #{stemcell_id} with env tags applied at resource creation: #{tags.keys.inspect}")
@@ -55,8 +54,8 @@ module Bosh::AwsCloud
 
     private
 
-    # V3 light-stemcell handling, separate from CloudV1's shared dispatch
-    # because V3 additionally applies env tags at resource creation.
+    # V3 light-stemcell handling, separate from CloudV1's light path because
+    # V3 additionally applies env tags at resource creation.
     def create_light_stemcell_v3(props, tags)
       # select the correct image for the configured ec2 client
       available_image = @ec2_resource.images(
