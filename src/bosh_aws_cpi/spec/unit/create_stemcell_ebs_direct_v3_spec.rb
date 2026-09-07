@@ -3,8 +3,8 @@ require "spec_helper"
 # Regression coverage for the CloudV3 create_stemcell dispatch.
 #
 # bosh create-env negotiates to api_version 3, so create_cloud builds a
-# CloudV3. CloudV3 overrides create_stemcell; it must route the heavy path
-# through the shared #dispatch_create_stemcell just like CloudV1. These specs
+# CloudV3. CloudV3 overrides create_stemcell; its heavy path must route through
+# the shared #create_ami_for_stemcell seam just like CloudV1. These specs
 # assert it delegates to StemcellCreator#create_via_ebs_direct and NEVER
 # touches the EC2 metadata endpoint (current_vm_id) or attaches an EBS volume,
 # and that env tags flow through.
