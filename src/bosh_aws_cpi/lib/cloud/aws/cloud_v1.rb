@@ -360,13 +360,9 @@ module Bosh::AwsCloud
     end
 
     ##
-    # Creates a new EC2 AMI using stemcell image.
-    # Light stemcells resolve an existing AMI via the API. Heavy stemcells
-    # write root.img straight into a new EBS snapshot via the EBS direct APIs
-    # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot) and register the AMI
-    # from that snapshot -- so, unlike the previous volume-attach approach, this
-    # no longer has to run on an EC2 instance and needs no S3 bucket or VM
-    # Import/Export role.
+    # Creates a new EC2 AMI using stemcell image. Light stemcells resolve an
+    # existing AMI via the API; heavy stemcells are imported via the EBS direct
+    # APIs (see #create_ami_for_stemcell).
     # @param [String] image_path local filesystem path to a stemcell image
     # @param [Hash] cloud_properties AWS-specific stemcell properties
     # @option cloud_properties [String] kernel_id
@@ -464,17 +460,11 @@ module Bosh::AwsCloud
       logger.debug("updated registry settings: #{registry.read_settings(instance_id)}")
     end
 
-    # Heavy-stemcell path. Shared seam for all CPI API versions:
-    # CloudV1#create_stemcell and CloudV3#create_stemcell both route heavy
-    # stemcells here so the two versions cannot diverge. Callers pass the tags
-    # from whichever source is correct for their version (props.tags for V1,
-    # the env argument for V3).
-    #
-    # Writes root.img straight into a new EBS snapshot via the EBS direct APIs
-    # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot) then registers the AMI.
-    # Never calls current_vm_id, never creates or attaches an EBS volume, and
-    # never shells out to stemcell-copy/dd -- works off-EC2 with no S3 bucket
-    # and no VM Import/Export role.
+    # Heavy-stemcell path, shared by CloudV1 and CloudV3 so the two API versions
+    # cannot diverge. Callers pass the tags correct for their version (props.tags
+    # for V1, the env argument for V3). Writes root.img straight into a new EBS
+    # snapshot via the EBS direct APIs, so it works off-EC2 with no attached
+    # volume, no S3 bucket, and no VM Import/Export role.
     def create_ami_for_stemcell(image_path, stemcell_cloud_props, tags = nil)
       creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
 

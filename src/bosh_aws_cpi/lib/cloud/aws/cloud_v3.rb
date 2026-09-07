@@ -9,13 +9,9 @@ module Bosh::AwsCloud
     API_VERSION = 3
 
     ##
-    # Creates a new EC2 AMI using stemcell image.
-    # Light stemcells resolve an existing AMI via the API. Heavy stemcells
-    # write root.img straight into a new EBS snapshot via the EBS direct APIs
-    # (StartSnapshot/PutSnapshotBlock/CompleteSnapshot) and register the AMI
-    # from that snapshot -- so, unlike the previous volume-attach approach, this
-    # no longer has to run on an EC2 instance and needs no S3 bucket or VM
-    # Import/Export role.
+    # Creates a new EC2 AMI using stemcell image. Light stemcells resolve an
+    # existing AMI via the API; heavy stemcells are imported via the EBS direct
+    # APIs (see CloudV1#create_ami_for_stemcell).
     # @param [String] image_path local filesystem path to a stemcell image
     # @param [Hash] cloud_properties AWS-specific stemcell properties
     # @option cloud_properties [String] kernel_id
@@ -73,8 +69,7 @@ module Bosh::AwsCloud
 
           "#{available_image.id} light"
         else
-          # Heavy stemcells share CloudV1's seam. Tags are sourced
-          # from the env argument (V3-specific) rather than props.tags.
+          # V3 sources tags from the env argument rather than props.tags.
           create_ami_for_stemcell(image_path, props, tags)
         end
       end

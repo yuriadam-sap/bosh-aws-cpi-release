@@ -1,6 +1,5 @@
 module Bosh::AwsCloud
   class StemcellCreator
-    include Bosh::Exec
     include Helpers
 
     # EBS direct API block size. StartSnapshot reports the authoritative value
@@ -14,7 +13,7 @@ module Bosh::AwsCloud
     EBS_DIRECT_SNAPSHOT_TIMEOUT_MINUTES = 60
 
     attr_reader :resource
-    attr_reader :volume, :device_path, :image_path
+    attr_reader :image_path
 
     def initialize(resource, stemcell_props)
       @resource = resource
@@ -22,27 +21,9 @@ module Bosh::AwsCloud
       @creation_tags = nil
     end
 
-    # @param tags [Hash, nil] optional string-key tag hash (e.g. Director env tags) applied at snapshot and AMI registration
-    def create(volume, device_path, image_path, tags = nil)
-      @volume = volume
-      @device_path = device_path
-      @image_path = image_path
-      @creation_tags = TagManager.tags_hash(tags)
-
-      copy_root_image
-
-      snapshot = volume.create_snapshot(
-        tag_specifications: TagManager.tag_specifications_for_resources(@creation_tags, ['snapshot']),
-      )
-      ResourceWait.for_snapshot(snapshot: snapshot, state: 'completed')
-
-      register_image_from_snapshot(snapshot.id)
-    end
-
-    # Container-friendly alternative to #create: writes root.img straight into a
-    # new EBS snapshot via the EBS direct APIs, then registers the AMI. Runs
-    # off-EC2 with only ebs:* write permissions -- no instance, no S3 bucket,
-    # no VM Import/Export role.
+    # Writes root.img straight into a new EBS snapshot via the EBS direct APIs,
+    # then registers the AMI. Runs off-EC2 with only ebs:* write permissions --
+    # no instance, no S3 bucket, no VM Import/Export role.
     #
     # @param image_path [String] local path to the stemcell .tgz image
     # @param encrypted [Boolean] whether the snapshot must be encrypted
@@ -91,7 +72,6 @@ module Bosh::AwsCloud
         client_token: SecureRandom.uuid,
         timeout: EBS_DIRECT_SNAPSHOT_TIMEOUT_MINUTES,
       }
-      # A KMS key implies encryption; encryption without a key uses the account default EBS key.
       if encrypted || has_kms_key
         start_params[:encrypted] = true
         start_params[:kms_key_arn] = kms_key_arn if has_kms_key
@@ -130,7 +110,6 @@ module Bosh::AwsCloud
       File.open(root_img, 'rb') do |f|
         index = 0
         while (chunk = f.read(block_size))
-          # Pad the final short block to a full block_size; EBS blocks are fixed size.
           chunk = chunk.ljust(block_size, "\0".b) if chunk.bytesize < block_size
           queue << [index, chunk] unless chunk == zero_block
           index += 1
@@ -184,7 +163,6 @@ module Bosh::AwsCloud
       end
     end
 
-    # Same ResourceWait poller as the classic path.
     def wait_for_snapshot_completed(snapshot_id)
       snapshot = resource.snapshot(snapshot_id)
       ResourceWait.for_snapshot(snapshot: snapshot, state: 'completed')
@@ -226,45 +204,6 @@ module Bosh::AwsCloud
       ResourceWait.for_image(image: image, state: 'available')
 
       Stemcell.new(resource, image)
-    end
-
-    # This method tries to execute the helper script stemcell-copy
-    # as root using sudo, since it needs to write to the device_path.
-    # If stemcell-copy isn't available, it falls back to writing directly
-    # to the device, which is used in the micro bosh deployer.
-    # The stemcell-copy script must be in the PATH of the user running
-    # the director, and needs sudo privileges to execute without
-    # password.
-    #
-    def copy_root_image
-      stemcell_copy = find_in_path('stemcell-copy')
-
-      if stemcell_copy
-        logger.debug('copying stemcell using stemcell-copy script')
-        # note that is is a potentially dangerous operation, but as the
-        # stemcell-copy script sets PATH to a sane value this is safe
-        command = "sudo -n #{stemcell_copy} #{image_path} #{device_path} 2>&1"
-      else
-        logger.info('falling back to using included copy stemcell')
-        included_stemcell_copy = File.expand_path('../../../../bin/stemcell-copy', __FILE__)
-        command = "sudo -n #{included_stemcell_copy} #{image_path} #{device_path} 2>&1"
-      end
-
-      result = sh(command)
-
-      logger.debug("stemcell copy output:\n#{result.output}")
-    rescue Bosh::Exec::Error => e
-      raise Bosh::Clouds::CloudError, "Unable to copy stemcell root image: #{e.message}\nScript output:\n#{e.output}"
-    end
-
-    # checks if the stemcell-copy script can be found in
-    # the current PATH
-    def find_in_path(command, path=ENV['PATH'])
-      path.split(':').each do |dir|
-        stemcell_copy = File.join(dir, command)
-        return stemcell_copy if File.exist?(stemcell_copy)
-      end
-      nil
     end
 
     def image_params(snapshot_id)
