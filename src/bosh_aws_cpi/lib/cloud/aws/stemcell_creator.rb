@@ -31,7 +31,7 @@ module Bosh::AwsCloud
     #   is true, AWS uses the account default EBS key
     # @param tags [Hash, nil] optional string-key tag hash
     # @return [Stemcell]
-    def create_via_ebs_direct(image_path, encrypted: false, kms_key_arn: nil, tags: nil)
+    def create(image_path, encrypted: false, kms_key_arn: nil, tags: nil)
       @image_path = image_path
       @creation_tags = TagManager.tags_hash(tags)
 

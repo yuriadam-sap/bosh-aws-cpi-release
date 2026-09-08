@@ -100,7 +100,7 @@ module Bosh::AwsCloud
       end
     end
 
-    describe '#create_via_ebs_direct' do
+    describe '#create' do
       let(:ebs_client) { instance_double(Aws::EBS::Client) }
       let(:creator) { described_class.new(ec2_resource, stemcell_cloud_props) }
 
@@ -116,7 +116,7 @@ module Bosh::AwsCloud
         expect(creator).to receive(:tag_snapshot).with('snap-tagged').ordered
         allow(creator).to receive(:register_image_from_snapshot).and_return(stemcell)
 
-        creator.create_via_ebs_direct('/path/to/image.tgz', encrypted: false, kms_key_arn: nil, tags: { 'env' => 'test' })
+        creator.create('/path/to/image.tgz', encrypted: false, kms_key_arn: nil, tags: { 'env' => 'test' })
         expect(creator.instance_variable_get(:@creation_tags)).to eq({ 'env' => 'test' })
       end
     end

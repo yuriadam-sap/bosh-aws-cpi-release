@@ -198,7 +198,7 @@ describe Bosh::AwsCloud::CloudV1 do
               .and_return(creator)
         end
 
-        expect(creator).to receive(:create_via_ebs_direct).with(
+        expect(creator).to receive(:create).with(
           "/tmp/foo",
           encrypted: false,
           kms_key_arn: nil,
@@ -227,7 +227,7 @@ describe Bosh::AwsCloud::CloudV1 do
               .and_return(creator)
         end
 
-        expect(creator).to receive(:create_via_ebs_direct).with(
+        expect(creator).to receive(:create).with(
           "/tmp/foo",
           encrypted: false,
           kms_key_arn: nil,
@@ -248,7 +248,7 @@ describe Bosh::AwsCloud::CloudV1 do
         expect(volume_manager).not_to receive(:create_ebs_volume)
         expect(volume_manager).not_to receive(:attach_ebs_volume)
 
-        expect(creator).to receive(:create_via_ebs_direct).with(
+        expect(creator).to receive(:create).with(
           "/tmp/foo",
           encrypted: false,
           kms_key_arn: nil,
@@ -280,7 +280,7 @@ describe Bosh::AwsCloud::CloudV1 do
               .and_return(creator)
         end
 
-        expect(creator).to receive(:create_via_ebs_direct).with(
+        expect(creator).to receive(:create).with(
           "/tmp/foo",
           encrypted: true,
           kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID",
@@ -309,7 +309,7 @@ describe Bosh::AwsCloud::CloudV1 do
                 .with(ec2, cloud_props).and_return(creator)
           end
 
-          expect(creator).to receive(:create_via_ebs_direct).with(
+          expect(creator).to receive(:create).with(
             "/tmp/foo",
             encrypted: false,
             kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID",
@@ -336,7 +336,7 @@ describe Bosh::AwsCloud::CloudV1 do
                 .with(ec2, cloud_props).and_return(creator)
           end
 
-          expect(creator).to receive(:create_via_ebs_direct).with(
+          expect(creator).to receive(:create).with(
             "/tmp/foo",
             encrypted: false,
             kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID",

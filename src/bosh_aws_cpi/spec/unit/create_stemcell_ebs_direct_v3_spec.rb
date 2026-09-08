@@ -5,9 +5,9 @@ require "spec_helper"
 # bosh create-env negotiates to api_version 3, so create_cloud builds a
 # CloudV3. CloudV3 overrides create_stemcell; its heavy path must route through
 # the shared #create_ami_for_stemcell seam just like CloudV1. These specs
-# assert it delegates to StemcellCreator#create_via_ebs_direct and NEVER
-# touches the EC2 metadata endpoint (current_vm_id) or attaches an EBS volume,
-# and that env tags flow through.
+# assert it delegates to StemcellCreator#create and NEVER touches the EC2
+# metadata endpoint (current_vm_id) or attaches an EBS volume, and that env
+# tags flow through.
 describe Bosh::AwsCloud::CloudV3 do
   before { @tmp_dir = Dir.mktmpdir }
   after { FileUtils.rm_rf(@tmp_dir) }
@@ -45,7 +45,7 @@ describe Bosh::AwsCloud::CloudV3 do
       expect(volume_manager).not_to receive(:create_ebs_volume)
       expect(volume_manager).not_to receive(:attach_ebs_volume)
 
-      expect(creator).to receive(:create_via_ebs_direct).with(
+      expect(creator).to receive(:create).with(
         "/tmp/foo",
         encrypted: false,
         kms_key_arn: nil,
@@ -62,7 +62,7 @@ describe Bosh::AwsCloud::CloudV3 do
 
       expect(cloud).not_to receive(:current_vm_id)
 
-      expect(creator).to receive(:create_via_ebs_direct).with(
+      expect(creator).to receive(:create).with(
         "/tmp/foo",
         encrypted: false,
         kms_key_arn: nil,
@@ -80,7 +80,7 @@ describe Bosh::AwsCloud::CloudV3 do
 
       cloud = make_cloud
 
-      expect(creator).to receive(:create_via_ebs_direct).with(
+      expect(creator).to receive(:create).with(
         "/tmp/foo",
         encrypted: true,
         kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID",

@@ -148,7 +148,7 @@ module Bosh::AwsCloud
       end
     end
 
-    describe '#create_via_ebs_direct' do
+    describe '#create' do
       it 'extracts, writes the snapshot, tags it, and registers the AMI' do
         stemcell = instance_double(Bosh::AwsCloud::Stemcell)
         allow(creator).to receive(:extract_root_image)
@@ -156,7 +156,7 @@ module Bosh::AwsCloud
         expect(creator).to receive(:tag_snapshot).with('snap-ebs').ordered
         expect(creator).to receive(:register_image_from_snapshot).with('snap-ebs').ordered.and_return(stemcell)
 
-        expect(creator.create_via_ebs_direct('/path/to/image.tgz')).to eq(stemcell)
+        expect(creator.create('/path/to/image.tgz')).to eq(stemcell)
       end
     end
 

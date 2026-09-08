@@ -469,7 +469,7 @@ module Bosh::AwsCloud
       creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
 
       logger.info('Creating stemcell via EBS direct APIs')
-      creator.create_via_ebs_direct(
+      creator.create(
         image_path,
         encrypted: !!stemcell_cloud_props.encrypted,
         kms_key_arn: stemcell_cloud_props.kms_key_arn,
