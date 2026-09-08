@@ -212,6 +212,31 @@ describe Bosh::AwsCloud::CloudV1 do
         expect(stemcell_cloud_props.tags).to eq({})
       end
 
+      it "forwards cloud-property tags to the EBS-direct creator" do
+        tags = { "env" => "test", "owner" => "bosh" }
+        tagged_properties = stemcell_properties.merge("tags" => tags)
+        tagged_cloud_props = Bosh::AwsCloud::StemcellCloudProps.new(tagged_properties, global_config)
+
+        allow(props_factory).to receive(:stemcell_props)
+            .with(tagged_properties)
+            .and_return(tagged_cloud_props)
+
+        cloud = mock_cloud do |ec2|
+          expect(Bosh::AwsCloud::StemcellCreator).to receive(:new)
+              .with(ec2, tagged_cloud_props)
+              .and_return(creator)
+        end
+
+        expect(creator).to receive(:create_via_ebs_direct).with(
+          "/tmp/foo",
+          encrypted: false,
+          kms_key_arn: nil,
+          tags: tags,
+        ).and_return(stemcell)
+
+        expect(cloud.create_stemcell("/tmp/foo", tagged_properties)).to eq("ami-xxxxxxxx")
+      end
+
       it "creates a stemcell via EBS direct without touching EC2 metadata or EBS" do
         volume_manager = instance_double(Bosh::AwsCloud::VolumeManager)
         cloud = mock_cloud do
@@ -223,47 +248,37 @@ describe Bosh::AwsCloud::CloudV1 do
         expect(volume_manager).not_to receive(:create_ebs_volume)
         expect(volume_manager).not_to receive(:attach_ebs_volume)
 
-        stemcell_ebs = instance_double(Bosh::AwsCloud::Stemcell, :id => "ami-ebs")
-        hvm_properties = stemcell_properties.merge("virtualization_type" => "hvm")
-        allow(props_factory).to receive(:stemcell_props)
-            .with(hvm_properties)
-            .and_return(Bosh::AwsCloud::StemcellCloudProps.new(hvm_properties, global_config))
         expect(creator).to receive(:create_via_ebs_direct).with(
           "/tmp/foo",
           encrypted: false,
           kms_key_arn: nil,
           tags: {},
-        ).and_return(stemcell_ebs)
+        ).and_return(stemcell)
 
-        expect(cloud.create_stemcell("/tmp/foo", hvm_properties)).to eq("ami-ebs")
+        expect(cloud.create_stemcell("/tmp/foo", stemcell_properties)).to eq("ami-xxxxxxxx")
       end
 
       it "forwards encrypted/kms_key_arn cloud properties to the EBS-direct creator" do
-        volume_manager = instance_double(Bosh::AwsCloud::VolumeManager)
-        options = mock_cloud_properties_merge(
-          "aws" => {
-            "stemcell" => {
-              "encrypted" => true,
-              "kms_key_arn" => "arn:aws:kms:us-east-1:ID:key/GUID",
-            },
-          },
-        )
-        cloud = mock_cloud(options) do
-          allow(Bosh::AwsCloud::StemcellCreator).to receive(:new).and_return(creator)
-          allow(Bosh::AwsCloud::VolumeManager).to receive(:new).and_return(volume_manager)
-        end
-
-        props_with_encryption = stemcell_properties.merge(
+        props_with_enc = stemcell_properties.merge(
           "encrypted" => true,
           "kms_key_arn" => "arn:aws:kms:us-east-1:ID:key/GUID",
         )
-        stemcell_enc = instance_double(Bosh::AwsCloud::Stemcell, :id => "ami-enc")
+        cloud_props_enc = Bosh::AwsCloud::StemcellCloudProps.new(
+          props_with_enc,
+          instance_double(Bosh::AwsCloud::Config, aws:
+            instance_double(Bosh::AwsCloud::AwsConfig, stemcell: {}, encrypted: true,
+              kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID")),
+        )
         allow(props_factory).to receive(:stemcell_props)
-            .with(props_with_encryption)
-            .and_return(Bosh::AwsCloud::StemcellCloudProps.new(props_with_encryption,
-              instance_double(Bosh::AwsCloud::Config, aws:
-                instance_double(Bosh::AwsCloud::AwsConfig, stemcell: {}, encrypted: true,
-                  kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID"))))
+            .with(props_with_enc)
+            .and_return(cloud_props_enc)
+
+        stemcell_enc = instance_double(Bosh::AwsCloud::Stemcell, :id => "ami-enc")
+        cloud = mock_cloud do |ec2|
+          expect(Bosh::AwsCloud::StemcellCreator).to receive(:new)
+              .with(ec2, cloud_props_enc)
+              .and_return(creator)
+        end
 
         expect(creator).to receive(:create_via_ebs_direct).with(
           "/tmp/foo",
@@ -272,7 +287,64 @@ describe Bosh::AwsCloud::CloudV1 do
           tags: {},
         ).and_return(stemcell_enc)
 
-        expect(cloud.create_stemcell("/tmp/foo", props_with_encryption)).to eq("ami-enc")
+        expect(cloud.create_stemcell("/tmp/foo", props_with_enc)).to eq("ami-enc")
+      end
+
+      context "when encryption information is incomplete" do
+        it "passes encrypted: false when encrypted=false and kms_key_arn is provided" do
+          props = stemcell_properties.merge(
+            "encrypted" => false,
+            "kms_key_arn" => "arn:aws:kms:us-east-1:ID:key/GUID",
+          )
+          cloud_props = Bosh::AwsCloud::StemcellCloudProps.new(
+            props,
+            instance_double(Bosh::AwsCloud::Config, aws:
+              instance_double(Bosh::AwsCloud::AwsConfig, stemcell: {}, encrypted: false,
+                kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID")),
+          )
+          allow(props_factory).to receive(:stemcell_props).with(props).and_return(cloud_props)
+
+          cloud = mock_cloud do |ec2|
+            expect(Bosh::AwsCloud::StemcellCreator).to receive(:new)
+                .with(ec2, cloud_props).and_return(creator)
+          end
+
+          expect(creator).to receive(:create_via_ebs_direct).with(
+            "/tmp/foo",
+            encrypted: false,
+            kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID",
+            tags: {},
+          ).and_return(stemcell)
+
+          expect(cloud.create_stemcell("/tmp/foo", props)).to eq("ami-xxxxxxxx")
+        end
+
+        it "passes encrypted: false when encrypted is absent and kms_key_arn is provided" do
+          props = stemcell_properties.merge(
+            "kms_key_arn" => "arn:aws:kms:us-east-1:ID:key/GUID",
+          )
+          cloud_props = Bosh::AwsCloud::StemcellCloudProps.new(
+            props,
+            instance_double(Bosh::AwsCloud::Config, aws:
+              instance_double(Bosh::AwsCloud::AwsConfig, stemcell: {}, encrypted: false,
+                kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID")),
+          )
+          allow(props_factory).to receive(:stemcell_props).with(props).and_return(cloud_props)
+
+          cloud = mock_cloud do |ec2|
+            expect(Bosh::AwsCloud::StemcellCreator).to receive(:new)
+                .with(ec2, cloud_props).and_return(creator)
+          end
+
+          expect(creator).to receive(:create_via_ebs_direct).with(
+            "/tmp/foo",
+            encrypted: false,
+            kms_key_arn: "arn:aws:kms:us-east-1:ID:key/GUID",
+            tags: {},
+          ).and_return(stemcell)
+
+          expect(cloud.create_stemcell("/tmp/foo", props)).to eq("ami-xxxxxxxx")
+        end
       end
     end
   end
