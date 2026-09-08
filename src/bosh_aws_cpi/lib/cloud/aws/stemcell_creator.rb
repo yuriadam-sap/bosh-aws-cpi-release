@@ -21,10 +21,6 @@ module Bosh::AwsCloud
       @creation_tags = nil
     end
 
-    # Writes root.img straight into a new EBS snapshot via the EBS direct APIs,
-    # then registers the AMI. Runs off-EC2 with only ebs:* write permissions --
-    # no instance, no S3 bucket, no VM Import/Export role.
-    #
     # @param image_path [String] local path to the stemcell .tgz image
     # @param encrypted [Boolean] whether the snapshot must be encrypted
     # @param kms_key_arn [String, nil] optional KMS key; when nil and encrypted
