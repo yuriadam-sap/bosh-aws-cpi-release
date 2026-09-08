@@ -462,9 +462,7 @@ module Bosh::AwsCloud
 
     # Heavy-stemcell path, shared by CloudV1 and CloudV3 so the two API versions
     # cannot diverge. Callers pass the tags correct for their version (props.tags
-    # for V1, the env argument for V3). Writes root.img straight into a new EBS
-    # snapshot via the EBS direct APIs, so it works off-EC2 with no attached
-    # volume, no S3 bucket, and no VM Import/Export role.
+    # for V1, the env argument for V3).
     def create_ami_for_stemcell(image_path, stemcell_cloud_props, tags = nil)
       creator = StemcellCreator.new(@ec2_resource, stemcell_cloud_props)
 
