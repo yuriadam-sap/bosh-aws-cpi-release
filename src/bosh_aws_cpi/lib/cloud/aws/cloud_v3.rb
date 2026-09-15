@@ -9,9 +9,9 @@ module Bosh::AwsCloud
     API_VERSION = 3
 
     ##
-    # Creates a new EC2 AMI using stemcell image.
-    # This method can only be run on an EC2 instance, as image creation
-    # involves creating and mounting new EBS volume as local block device.
+    # Creates a new EC2 AMI using stemcell image. Light stemcells resolve an
+    # existing AMI via the API; heavy stemcells are imported via the EBS direct
+    # APIs (see CloudV1#create_ami_for_stemcell).
     # @param [String] image_path local filesystem path to a stemcell image
     # @param [Hash] cloud_properties AWS-specific stemcell properties
     # @option cloud_properties [String] kernel_id
@@ -69,14 +69,8 @@ module Bosh::AwsCloud
 
           "#{available_image.id} light"
         else
-          stemcell_id = create_ami_for_stemcell(image_path, props, tags)
-
-          if !tags.nil? && !tags.empty?
-            logger.info("Created stemcell AMI #{stemcell_id} with env tags applied at resource creation: #{tags.keys.inspect}")
-          else
-            logger.info("Created stemcell AMI #{stemcell_id}.")
-          end
-          stemcell_id
+          # V3 sources tags from the env argument rather than props.tags.
+          create_ami_for_stemcell(image_path, props, tags)
         end
       end
     end
